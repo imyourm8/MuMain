@@ -2,6 +2,8 @@
 ///////////////////////////////////////////////////////////////////////////////
 #include "stdafx.h"
 #include "Core/Input/KeyState.h"
+#include "App/Control/ControlServer.h"
+#include "Core/Text/Utf8.h"
 #include "App/Platform/DiagnosticFrameCaptureSchedule.h"
 #include "App/Platform/DiagnosticFrameCaptureWriter.h"
 
@@ -1355,6 +1357,13 @@ MSG MainLoop()
             case SDL_EVENT_QUIT:
                 Destroy = true;
                 break;
+            case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+                // Titlebar X / Alt+F4. Close on this event directly instead of relying
+                // solely on the SDL_EVENT_QUIT SDL derives from it - depending on that
+                // indirection left the first close press with no visible effect, only
+                // closing the window on a second press (#535).
+                Destroy = true;
+                break;
             case SDL_EVENT_MOUSE_MOTION:
                 HandleMouseMotion(event.motion.x, event.motion.y);
                 break;
@@ -1489,6 +1498,12 @@ MSG MainLoop()
 
         // Fire any due timers. Replaces the Win32 SetTimer/WM_TIMER dispatch.
         Core::Time::FrameTimerScheduler::Instance().Tick();
+
+        // Serve the control socket, after this frame's packets have been
+        // processed so a command sees the newest game state, and before
+        // rendering so an act's step is drawn in the same frame. Does nothing
+        // when the socket was never opened.
+        App::Control::ControlServer::Instance().Poll();
 
         if (CheckRenderNextFrame())
         {
@@ -1788,6 +1803,10 @@ static void ShutdownRuntime(std::thread& cpuUsageRecorder)
 {
     // The recorder polls process state until Destroy is set.
     Destroy = true;
+
+    // Closes the control socket and removes its file, so a later client with
+    // the same name does not find a live-looking socket.
+    App::Control::ControlServer::Instance().Stop();
     if (cpuUsageRecorder.joinable())
     {
         cpuUsageRecorder.join();
@@ -1799,8 +1818,22 @@ static void ShutdownRuntime(std::thread& cpuUsageRecorder)
 #endif
 
     // Complete the final submitted frame before UI and bitmap owners release
-    // textures referenced by it. This keeps Metal teardown deterministic.
+    // textures referenced by it. This keeps Metal teardown deterministic. Do
+    // this while the window is still visible: the compositor can stop
+    // servicing a hidden/occluded window's swapchain, leaving this wait
+    // stuck on a present fence that only signals once something (e.g. a
+    // focus change) forces the compositor to redraw (#535).
     mu::WaitForSDLGpuIdle();
+
+    // Hide the window before the teardown below, which pumps no messages and
+    // can take a noticeable moment (asset/UI release, ...). Left visible, the
+    // OS flags it as unresponsive and closing needs a second click to force
+    // the resulting ghost window away (#535).
+    if (g_sdlWindow != nullptr)
+    {
+        SDL_HideWindow(g_sdlWindow);
+    }
+
     UnregisterBundledFonts();
     DestroyWindow();
     ShutdownRendererWindow();
@@ -1982,7 +2015,13 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR szCmdLine, int nC
     // SDL owns the window; SDL_gpu owns the rendering device.
     if (!SDL_InitSubSystem(SDL_INIT_VIDEO))
     {
-        g_ErrorReport.Write(L"> SDL video init failed.\r\n");
+        const char* requestedVideoDriver = SDL_GetHint(SDL_HINT_VIDEO_DRIVER);
+        const std::wstring requestedDriver = requestedVideoDriver != nullptr && requestedVideoDriver[0] != '\0'
+                                                 ? Utf8ToWide(requestedVideoDriver)
+                                                 : L"auto";
+        const std::wstring videoInitError = Utf8ToWide(SDL_GetError());
+        g_ErrorReport.Write(L"> SDL video init failed. Requested driver: %ls. SDL error: %ls\r\n",
+                            requestedDriver.c_str(), videoInitError.c_str());
         MessageBox(nullptr, L"Windows aplication error!", L"Aplication Error", MB_ICONERROR);
         return 0;
     }
@@ -2225,6 +2264,9 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR szCmdLine, int nC
         SystemParametersInfo(SPI_SETSCREENSAVETIMEOUT, 300 * 60, nullptr, 0);
     }
 #endif // _WIN32
+
+    // Opened only when the launcher set the path; silent otherwise.
+    App::Control::ControlServer::Instance().Start(Core::Text::ToUtf8(lpszExeVersion));
 
     std::thread cpuUsageRecorder(RecordCpuUsage);
     const MSG msg = MainLoop();
