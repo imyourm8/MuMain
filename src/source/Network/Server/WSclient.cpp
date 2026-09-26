@@ -23,6 +23,7 @@
 #include "Scenes/SceneCore.h"
 #include "Network/Reconnect/ReconnectManager.h"
 #include "Network/IncomingPacketQueue.h"
+#include "Network/Server/SpotSnapshotStore.h"
 #include "I18N/All.h"
 
 #include "Audio/DSPlaySound.h"
@@ -978,6 +979,7 @@ BOOL ReceiveLogOut(const BYTE* ReceiveBuffer, BOOL bEncrypted)
         SocketClient->ToGameServer()->SendRequestCharacterList(g_pMultiLanguage->GetLanguage());
 
         g_sceneInit.ResetForDisconnect();
+        Network::Server::SpotSnapshotStore::Instance().Clear();
         CurrentProtocolState = REQUEST_JOIN_SERVER;
         InitGame();
         break;
@@ -1006,6 +1008,7 @@ BOOL ReceiveLogOut(const BYTE* ReceiveBuffer, BOOL bEncrypted)
         SceneFlag = LOG_IN_SCENE;
 
         g_sceneInit.ResetForDisconnect();
+        Network::Server::SpotSnapshotStore::Instance().Clear();
         CurrentProtocolState = REQUEST_JOIN_SERVER;
 
         LogIn = 0;
@@ -1056,6 +1059,7 @@ void ResetClientToLoginScene()
     ReleaseCharacterSceneData();
     SceneFlag = LOG_IN_SCENE;
     g_sceneInit.ResetForDisconnect();
+    Network::Server::SpotSnapshotStore::Instance().Clear();
     CurrentProtocolState = REQUEST_JOIN_SERVER;
     LogIn = 0;
     g_csMapServer.Init();
@@ -1064,6 +1068,15 @@ void ResetClientToLoginScene()
     g_pWindowMgr->Reset();
     g_pFriendList->ClearFriendList();
     g_pLetterList->ClearLetterList();
+}
+
+void RequestSpotSnapshot(BYTE mapNumber)
+{
+    constexpr BYTE spotPacketCode = 0xFA;
+    constexpr BYTE spotRequestSubcode = 0x01;
+    Network::Server::SpotSnapshotStore::Instance().ExpectMap(mapNumber);
+    const BYTE packet[] = {0xC1, 0x06, spotPacketCode, spotRequestSubcode, 0x00, mapNumber};
+    SocketClient->Send(packet, sizeof(packet));
 }
 
 int HeroIndex;
@@ -1244,6 +1257,8 @@ BOOL ReceiveJoinMapServer(std::span<const BYTE> ReceiveBuffer)
     // ones of a previous character before asking for them again.
     GameLogic::Commands::Catalog().Reset();
     GameLogic::Commands::Catalog().RequestOnce();
+
+    RequestSpotSnapshot(Data->Map);
 
     g_ConsoleDebug->Write(MCD_RECEIVE, L"0x03 [ReceiveJoinMapServer]");
 
@@ -2264,6 +2279,7 @@ BOOL ReceiveTeleport(const BYTE* ReceiveBuffer, BOOL bEncrypted)
         }
 
         SocketClient->ToGameServer()->SendClientReadyAfterMapChange();
+        RequestSpotSnapshot(Data->Map);
 
         g_dwLatestZoneMoving = GetTickCount();
         g_bWhileMovingZone = FALSE;
@@ -13462,6 +13478,9 @@ static void ProcessPacket(const BYTE* ReceiveBuffer, int32_t Size)
     }
     switch (HeadCode)
     {
+    case 0xFA:
+        Network::Server::SpotSnapshotStore::Instance().ApplyPacket(received_span);
+        break;
     case 0xF1:
     {
         auto Data = (LPPHEADER_DEFAULT_SUBCODE)ReceiveBuffer;

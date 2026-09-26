@@ -6,6 +6,13 @@ mu_add_test(
 )
 
 mu_add_test(
+    NAME test_spot_snapshot
+    SOURCES
+        test_spot_snapshot.cpp
+        ${CMAKE_SOURCE_DIR}/src/source/Network/Server/SpotSnapshotStore.cpp
+)
+
+mu_add_test(
     NAME test_connection_library_load
     SOURCES
         test_connection_library_load.cpp
