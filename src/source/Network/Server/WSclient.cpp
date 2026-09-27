@@ -13870,6 +13870,12 @@ static void ProcessPacket(const BYTE* ReceiveBuffer, int32_t Size)
         AddDebugText(ReceiveBuffer, Size);
         ReceiveDurability(ReceiveBuffer);
         break;
+    case 0x35:
+        if (Size >= 6 && g_pMyInventory != nullptr)
+        {
+            g_pMyInventory->OnStackSplitResponse(ReceiveBuffer[3], ReceiveBuffer[4], ReceiveBuffer[5]);
+        }
+        break;
     case 0x26:
         ReceiveStatsExtended(ReceiveBuffer);
         break;

@@ -12,6 +12,7 @@
 #include "UI/NewUI/NewUI3DRenderMng.h"
 #include "UI/NewUI/Widgets/NewUIButton.h"
 #include "UI/NewUI/Inventory/NewUIInventoryActionController.h"
+#include "UI/NewUI/Inventory/InventoryStackSplitPopup.h"
 #include "GameLogic/Items/IInventoryActionContext.h"
 #include <span>
 #include "Core/Globals/_enum.h"
@@ -78,6 +79,9 @@ namespace SEASON3B
         CNewUI3DRenderMng* m_pNewUI3DRenderMng;
         CNewUIInventoryCtrl* m_pNewInventoryCtrl;
         CNewUIInventoryActionController m_ActionController;
+        CInventoryStackSplitPopup m_SplitPopup;
+        BYTE m_NextSplitRequestId = 0;
+        BYTE m_ActiveSplitRequestId = 0;
         POINT m_Pos;
 
         EQUIPMENT_ITEM m_EquipmentSlots[MAX_EQUIPMENT_INDEX];
@@ -121,6 +125,9 @@ namespace SEASON3B
         const POINT& GetPos() const;
 
         void SetRepairMode(bool bRepair);
+        void OpenStackSplitPopup(CNewUIInventoryCtrl* control, ITEM* item, int sourceSlot);
+        void TakeFromStack(int amount);
+        void OnStackSplitResponse(BYTE sourceSlot, BYTE requestId, BYTE result);
 
 #ifdef LJH_ADD_SYSTEM_OF_EQUIPPING_ITEM_FROM_INVENTORY
         BOOL IsInvenItem(const short sType);

@@ -15,8 +15,7 @@
 
 namespace UI::Items::Drag
 {
-    POINT PickupOffset(int itemLeft, int itemTop, int itemWidth, int itemHeight,
-                       int pointerX, int pointerY, bool preserveAnchor);
+    POINT PickupOffset(int itemWidth, int itemHeight);
     POINT ItemTopLeft(int pointerX, int pointerY, const POINT& pickupOffset);
     bool ShouldConsumePanelPress(bool hasPickedItem, bool leftButtonPressed);
 }
@@ -24,6 +23,8 @@ namespace UI::Items::Drag
 namespace UI::Items::Grid
 {
     bool Fits(int startIndex, int itemWidth, int itemHeight, int columnCount, int rowCount);
+    bool FitsAt(int column, int row, int itemWidth, int itemHeight, int columnCount, int rowCount);
+    int SnapCoordinate(int itemStart, int gridStart, int squareSize);
 }
 
 namespace SEASON3B
@@ -67,8 +68,7 @@ namespace SEASON3B
         CNewUIPickedItem();
         virtual ~CNewUIPickedItem();
 
-        bool Create(CNewUIItemMng* pNewItemMng, CNewUIInventoryCtrl* pSrc, ITEM* pItem,
-                    bool preservePickupAnchor);
+        bool Create(CNewUIItemMng* pNewItemMng, CNewUIInventoryCtrl* pSrc, ITEM* pItem);
         void Release();
 
         CNewUIInventoryCtrl* GetOwnerInventory() const;
@@ -260,6 +260,7 @@ namespace SEASON3B
         //. Check Functions
         /* Caution: It's square index, not list index */
         bool GetSquarePosAtPt(int x, int y, int& iColumnX, int& iRowY);
+        void GetSnappedSquarePosAtItemTopLeft(int x, int y, int& iColumnX, int& iRowY) const;
 
         bool CheckPtInRect(int x, int y);
         bool CheckRectInRect(const RECT& rcBox);
@@ -278,6 +279,7 @@ namespace SEASON3B
         bool IsRepairMode();
 
         bool AreItemsStackable(ITEM* pSourceItem, ITEM* pTargetItem);
+        static bool IsPotentialStackItem(const ITEM* item);
         bool CanPushItem();
         bool CanUpgradeItem(ITEM* pSourceItem, ITEM* pTargetItem);
 
@@ -285,7 +287,7 @@ namespace SEASON3B
 
         //. PickedItem Control Functions
         static CNewUIPickedItem* GetPickedItem();
-        static bool CreatePickedItem(CNewUIInventoryCtrl* pSrc, ITEM* pItem, bool preservePickupAnchor = false);
+        static bool CreatePickedItem(CNewUIInventoryCtrl* pSrc, ITEM* pItem);
         static void DeletePickedItem();
         static void BackupPickedItem();
 

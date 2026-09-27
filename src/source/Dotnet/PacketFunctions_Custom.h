@@ -50,6 +50,7 @@ struct AreaSkillHitTarget
 class PacketFunctions_ClientToServer_Custom : public PacketFunctions_Base
 {
 public:
+    void SendInventoryStackSplitRequest(BYTE sourceSlot, BYTE amount, BYTE expectedCount, BYTE requestId);
     /// <summary>
     /// Sends a LoginLongPassword to this connection.
     /// </summary>

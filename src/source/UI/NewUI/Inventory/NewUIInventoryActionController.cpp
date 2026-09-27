@@ -463,6 +463,16 @@ bool CNewUIInventoryActionController::RepairItemAtMousePoint(CNewUIInventoryCtrl
         return true;
     }
 
+    if (CNewUIInventoryCtrl::GetPickedItem() == nullptr && CNewUIInventoryCtrl::IsPotentialStackItem(pItem))
+    {
+        const int sourceSlot = targetControl->GetIndexByItem(pItem);
+        if (sourceSlot >= 0)
+        {
+            g_pMyInventory->OpenStackSplitPopup(targetControl, pItem, sourceSlot);
+        }
+        return true;
+    }
+
     if (IsRepairBan(pItem))
     {
         return true;

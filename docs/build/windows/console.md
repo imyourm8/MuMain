@@ -1,14 +1,14 @@
 # Windows - Terminal (CMake presets)
 
-Native MSVC build from a **Developer Command Prompt / Developer PowerShell for
-VS** (so `cl`, CMake, and Ninja are on `PATH`), using the bundled presets.
+Native MSVC build using the bundled Visual Studio 2026 CMake presets. Run from
+a regular terminal with CMake available on `PATH`.
 
 See [the build guide](../README.md) for shared concepts. To cross-compile the
 Windows client from Linux/WSL instead, see [wsl.md](wsl.md).
 
 ## Prerequisites
 
-- Visual Studio C++ build tools (CMake + Ninja).
+- Visual Studio 2026 C++ build tools (CMake + MSBuild).
 - The **.NET 10 SDK**.
 - [vcpkg](https://github.com/microsoft/vcpkg), with `VCPKG_ROOT` set to its
   installation directory. The presets select `x64-windows` or `x86-windows`

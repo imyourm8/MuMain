@@ -12,8 +12,19 @@
 //------------------------------------------------------------------------------
 
 #include "stdafx.h"
+
 #include "Connection.h"
 #include "PacketFunctions_ClientToServer.h"
+
+void PacketFunctions_ClientToServer_Custom::SendInventoryStackSplitRequest(BYTE sourceSlot, BYTE amount, BYTE expectedCount, BYTE requestId)
+{
+    using SplitRequest = void(CORECLR_DELEGATE_CALLTYPE*)(int32_t, BYTE, BYTE, BYTE, BYTE);
+    static const auto send = LoadManagedSymbol<SplitRequest>("SendInventoryStackSplitRequest");
+    if (send)
+    {
+        send(this->GetHandle(), sourceSlot, amount, expectedCount, requestId);
+    }
+}
 
 typedef void(CORECLR_DELEGATE_CALLTYPE* SendLoginFn)(int32_t, const char16_t*, const char16_t*, uint32_t, const BYTE*,
                                                      const BYTE*);

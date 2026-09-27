@@ -193,15 +193,15 @@ TEST_CASE("docks use a moderate large-screen cap without changing dialogs [ui][s
     CHECK(fourKDialog.scaleY == doctest::Approx(2.0f));
 }
 
-TEST_CASE("inventory drag keeps the clicked point anchored to the item [ui][inventory]")
+TEST_CASE("inventory drag centers the item under the pointer [ui][inventory]")
 {
-    const POINT offset = UI::Items::Drag::PickupOffset(180, 260, 40, 60, 183, 317, true);
-    CHECK(offset.x == 3);
-    CHECK(offset.y == 57);
+    const POINT offset = UI::Items::Drag::PickupOffset(40, 60);
+    CHECK(offset.x == 20);
+    CHECK(offset.y == 30);
 
     const POINT itemTopLeft = UI::Items::Drag::ItemTopLeft(183, 317, offset);
-    CHECK(itemTopLeft.x == 180);
-    CHECK(itemTopLeft.y == 260);
+    CHECK(itemTopLeft.x == 163);
+    CHECK(itemTopLeft.y == 287);
 }
 
 TEST_CASE("inventory item hover animation ignores world input capture [ui][inventory]")
@@ -244,36 +244,51 @@ TEST_CASE("VSync preference defaults on and remains mutable [config][render]")
     config.SetVSyncEnabled(previous);
 }
 
-TEST_CASE("inventory drag centers items without a grid pickup anchor [ui][inventory]")
-{
-    const POINT offset = UI::Items::Drag::PickupOffset(0, 0, 40, 60, 183, 317, false);
-    CHECK(offset.x == 20);
-    CHECK(offset.y == 30);
-}
-
-TEST_CASE("inventory drag keeps border drops in their original slots [ui][inventory]")
+TEST_CASE("one-slot inventory highlight follows the pointer across grid boundaries [ui][inventory]")
 {
     constexpr int gridLeft = 100;
     constexpr int gridTop = 200;
+    const POINT offset = UI::Items::Drag::PickupOffset(20, 20);
 
-    const POINT leftOffset = UI::Items::Drag::PickupOffset(gridLeft, gridTop, 40, 40, 101, 201, true);
-    const POINT leftTopLeft = UI::Items::Drag::ItemTopLeft(101, 201, leftOffset);
-    CHECK(leftTopLeft.x == gridLeft);
-    CHECK(leftTopLeft.y == gridTop);
-    CHECK((leftTopLeft.x - gridLeft) / SEASON3B::INVENTORY_SQUARE_WIDTH == 0);
-    CHECK((leftTopLeft.y - gridTop) / SEASON3B::INVENTORY_SQUARE_HEIGHT == 0);
+    const POINT beforeBoundary = UI::Items::Drag::ItemTopLeft(119, 219, offset);
+    CHECK(UI::Items::Grid::SnapCoordinate(beforeBoundary.x, gridLeft, 20) == 0);
+    CHECK(UI::Items::Grid::SnapCoordinate(beforeBoundary.y, gridTop, 20) == 0);
 
-    constexpr int rightItemLeft = gridLeft + 6 * SEASON3B::INVENTORY_SQUARE_WIDTH;
-    const POINT rightOffset = UI::Items::Drag::PickupOffset(rightItemLeft, gridTop, 40, 40,
-                                                            rightItemLeft + 39, gridTop + 39, true);
-    const POINT rightTopLeft = UI::Items::Drag::ItemTopLeft(rightItemLeft + 39, gridTop + 39, rightOffset);
-    CHECK(rightTopLeft.x == rightItemLeft);
-    CHECK(rightTopLeft.y == gridTop);
-    CHECK((rightTopLeft.x - gridLeft) / SEASON3B::INVENTORY_SQUARE_WIDTH == 6);
-    CHECK((rightTopLeft.y - gridTop) / SEASON3B::INVENTORY_SQUARE_HEIGHT == 0);
+    const POINT afterBoundary = UI::Items::Drag::ItemTopLeft(121, 221, offset);
+    CHECK(UI::Items::Grid::SnapCoordinate(afterBoundary.x, gridLeft, 20) == 1);
+    CHECK(UI::Items::Grid::SnapCoordinate(afterBoundary.y, gridTop, 20) == 1);
+
+    const POINT lowerSlot = UI::Items::Drag::ItemTopLeft(109, 221, offset);
+    CHECK(UI::Items::Grid::SnapCoordinate(lowerSlot.x, gridLeft, 20) == 0);
+    CHECK(UI::Items::Grid::SnapCoordinate(lowerSlot.y, gridTop, 20) == 1);
 }
 
-TEST_CASE("inventory drag anchor survives dock scaling [ui][inventory]")
+TEST_CASE("multi-slot inventory highlight chooses greatest overlap and lower-right ties [ui][inventory]")
+{
+    const POINT offset = UI::Items::Drag::PickupOffset(40, 40);
+    const POINT beforeTie = UI::Items::Drag::ItemTopLeft(129, 229, offset);
+    const POINT atTie = UI::Items::Drag::ItemTopLeft(130, 230, offset);
+
+    CHECK(UI::Items::Grid::SnapCoordinate(beforeTie.x, 100, 20) == 0);
+    CHECK(UI::Items::Grid::SnapCoordinate(beforeTie.y, 200, 20) == 0);
+    CHECK(UI::Items::Grid::SnapCoordinate(atTie.x, 100, 20) == 1);
+    CHECK(UI::Items::Grid::SnapCoordinate(atTie.y, 200, 20) == 1);
+    CHECK(UI::Items::Grid::FitsAt(1, 1, 2, 2, 3, 3));
+    CHECK_FALSE(UI::Items::Grid::FitsAt(2, 1, 2, 2, 3, 3));
+}
+
+TEST_CASE("inventory preview rejects a snapped footprint beyond the grid [ui][inventory]")
+{
+    CHECK(UI::Items::Grid::SnapCoordinate(89, 100, 20) == -1);
+    CHECK(UI::Items::Grid::SnapCoordinate(90, 100, 20) == 0);
+    CHECK_FALSE(UI::Items::Grid::FitsAt(-1, 0, 1, 1, 8, 8));
+    CHECK(UI::Items::Grid::FitsAt(0, 0, 1, 1, 8, 8));
+    CHECK_FALSE(UI::Items::Grid::FitsAt(8, 0, 1, 1, 8, 8));
+    CHECK_FALSE(UI::Items::Grid::FitsAt(0, 8, 1, 1, 8, 8));
+    CHECK_FALSE(UI::Items::Grid::FitsAt(7, 7, 2, 2, 8, 8));
+}
+
+TEST_CASE("inventory drag center survives dock scaling [ui][inventory]")
 {
     const auto dock = UI::Scaling::DockRightTransform(1920, 1080);
     constexpr int itemLeft = 465;
@@ -285,11 +300,12 @@ TEST_CASE("inventory drag anchor survives dock scaling [ui][inventory]")
     const int logicalPointerX = static_cast<int>(std::floor(UI::Scaling::LogicalX(dock, windowPointerX)));
     const int logicalPointerY = static_cast<int>(std::floor(UI::Scaling::LogicalY(dock, windowPointerY)));
 
-    const POINT offset = UI::Items::Drag::PickupOffset(itemLeft, itemTop, 40, 40,
-                                                       logicalPointerX, logicalPointerY, true);
+    const POINT offset = UI::Items::Drag::PickupOffset(40, 40);
     const POINT itemTopLeft = UI::Items::Drag::ItemTopLeft(logicalPointerX, logicalPointerY, offset);
-    CHECK(itemTopLeft.x == itemLeft);
-    CHECK(itemTopLeft.y == itemTop);
+    CHECK(itemTopLeft.x + offset.x == logicalPointerX);
+    CHECK(itemTopLeft.y + offset.y == logicalPointerY);
+    CHECK(UI::Items::Grid::SnapCoordinate(itemTopLeft.x, 450, 20) == 2);
+    CHECK(UI::Items::Grid::SnapCoordinate(itemTopLeft.y, 200, 20) == 1);
 }
 
 TEST_CASE("inventory rejects item footprints beyond the final column [ui][inventory]")

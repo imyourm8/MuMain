@@ -16,7 +16,44 @@ using MUnique.OpenMU.Network.Xor;
 /// </summary>
 public unsafe partial class ConnectionManager
 {
+    private const byte InventoryStackSplitCode = 0x35;
     private static readonly Xor3Encryptor Xor3Encryptor = new(0);
+
+    /// <summary>Sends a request to split an inventory stack.</summary>
+    /// <param name="handle">Connection handle.</param>
+    /// <param name="sourceSlot">Slot containing the original stack.</param>
+    /// <param name="amount">Number of items to take.</param>
+    /// <param name="expectedCount">Count shown when the popup opened.</param>
+    /// <param name="requestId">Identifier echoed by the server response.</param>
+    [UnmanagedCallersOnly(EntryPoint = "SendInventoryStackSplitRequest")]
+    public static void SendInventoryStackSplitRequest(int handle, byte sourceSlot, byte amount, byte expectedCount, byte requestId)
+    {
+        if (!Connections.TryGetValue(handle, out var connection))
+        {
+            return;
+        }
+
+        try
+        {
+            connection.CreateAndSend(writer =>
+            {
+                const int length = 7;
+                var packet = writer.GetSpan(length);
+                packet[0] = 0xC1;
+                packet[1] = length;
+                packet[2] = InventoryStackSplitCode;
+                packet[3] = sourceSlot;
+                packet[4] = amount;
+                packet[5] = expectedCount;
+                packet[6] = requestId;
+                return length;
+            });
+        }
+        catch (Exception ex)
+        {
+            ManagedLog.Write(ManagedLog.Level.Error, $"NET: stack split request failed: {ex}");
+        }
+    }
 
     /// <summary>
     /// Sends a <see cref="LoginLongPassword" /> to this connection.

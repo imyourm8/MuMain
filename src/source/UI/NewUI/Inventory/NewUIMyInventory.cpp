@@ -80,6 +80,9 @@ bool CNewUIMyInventory::Create(CNewUIManager* pNewUIMng, CNewUI3DRenderMng* pNew
     }
 
     m_ActionController.SetContext(this); 
+    m_SplitPopup.Initialize(this);
+    m_pNewUIMng->AddUIObj(INTERFACE_INVENTORY_STACK_SPLIT_POPUP, &m_SplitPopup);
+    m_SplitPopup.SetLayoutMode(GetLayoutMode());
 
     SetPos(x, y);
     LoadImages();
@@ -91,6 +94,7 @@ bool CNewUIMyInventory::Create(CNewUIManager* pNewUIMng, CNewUI3DRenderMng* pNew
 
 void CNewUIMyInventory::Release()
 {
+    m_SplitPopup.Close();
     if (m_pNewUI3DRenderMng)
         m_pNewUI3DRenderMng->DeleteUI2DEffectObject(UI2DEffectCallback);
 
@@ -108,6 +112,7 @@ void CNewUIMyInventory::Release()
     }
     if (m_pNewUIMng)
     {
+        m_pNewUIMng->RemoveUIObj(&m_SplitPopup);
         m_pNewUIMng->RemoveUIObj(this);
         m_pNewUIMng = nullptr;
     }
@@ -437,6 +442,10 @@ SEASON3B::REPAIR_MODE CNewUIMyInventory::GetRepairMode() const
 
 void CNewUIMyInventory::SetRepairMode(bool bRepair)
 {
+    if (!bRepair)
+    {
+        m_SplitPopup.Close();
+    }
     if (bRepair)
     {
         m_RepairMode = REPAIR_MODE_ON;
@@ -452,6 +461,69 @@ void CNewUIMyInventory::SetRepairMode(bool bRepair)
         {
             m_pNewInventoryCtrl->SetRepairMode(false);
         }
+    }
+}
+
+void CNewUIMyInventory::OpenStackSplitPopup(CNewUIInventoryCtrl* control, ITEM* item, int sourceSlot)
+{
+    if (control == nullptr || item == nullptr || CNewUIInventoryCtrl::GetPickedItem() != nullptr)
+    {
+        return;
+    }
+
+    const auto& pos = control->GetPos();
+    const auto& attribute = ItemAttribute[item->Type];
+    control->DeleteItemToolTip();
+    SetRepairMode(false);
+    RepairEnable = 0;
+    m_SplitPopup.Open(pos.x + item->x * INVENTORY_SQUARE_WIDTH,
+                      pos.y + item->y * INVENTORY_SQUARE_HEIGHT,
+                      attribute.Width * INVENTORY_SQUARE_WIDTH, sourceSlot, static_cast<int>(item->Durability));
+}
+
+void CNewUIMyInventory::TakeFromStack(int amount)
+{
+    if (!m_SplitPopup.IsOpen() || m_SplitPopup.IsPending())
+    {
+        return;
+    }
+
+    if (amount == m_SplitPopup.GetExpectedCount())
+    {
+        m_SplitPopup.Close();
+        return;
+    }
+
+    if (amount > 0)
+    {
+        m_SplitPopup.SetPending(true);
+        m_ActiveSplitRequestId = ++m_NextSplitRequestId;
+        SocketClient->ToGameServer()->SendInventoryStackSplitRequest(
+            static_cast<BYTE>(m_SplitPopup.GetSourceSlot()), static_cast<BYTE>(amount),
+            static_cast<BYTE>(m_SplitPopup.GetExpectedCount()), m_ActiveSplitRequestId);
+    }
+}
+
+void CNewUIMyInventory::OnStackSplitResponse(BYTE sourceSlot, BYTE requestId, BYTE result)
+{
+    if (!m_SplitPopup.IsOpen() || !m_SplitPopup.IsPending() || m_SplitPopup.GetSourceSlot() != sourceSlot ||
+        m_ActiveSplitRequestId != requestId)
+    {
+        return;
+    }
+
+    if (result == 0)
+    {
+        SetRepairMode(false);
+        RepairEnable = 0;
+    }
+    else if (result == 1)
+    {
+        m_SplitPopup.ShowNoSpace();
+    }
+    else
+    {
+        m_SplitPopup.ShowChanged();
     }
 }
 

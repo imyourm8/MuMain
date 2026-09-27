@@ -8,14 +8,18 @@ See [the build guide](../README.md) for shared concepts.
 
 ## Prerequisites
 
-- Visual Studio with the **Desktop development with C++** workload (includes
-  CMake and Ninja).
+- Visual Studio 2026 with the **Desktop development with C++** workload
+  (includes CMake and MSBuild).
 - The **.NET 10 SDK** (for the network library and the build-time codegen).
+- Git with HTTPS support (for CMake's fetched source dependencies).
+- `VCPKG_ROOT` set to a vcpkg installation directory before launching Visual
+  Studio. The vcpkg installation bundled with Visual Studio is suitable.
 
 ## Build
 
 1. **Open** the repository folder in Visual Studio (`File > Open > Folder`). VS
-   reads `CMakePresets.json` automatically.
+   reads `CMakePresets.json` automatically. The Windows presets use the Visual
+   Studio 2026 generator so CMake can find MSVC without a Developer Prompt.
 2. Pick a configure preset from the toolbar:
 
    | Preset | Arch | Editor |
