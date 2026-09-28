@@ -2,6 +2,7 @@
 
 #include "ItemAttributeConversion.h"
 #include "ItemType.h"
+#include "Core/Text/Utf8.h"
 
 #include <algorithm>
 
@@ -13,7 +14,7 @@ void CopyStats(const ITEM_ATTRIBUTE& attribute, ItemDefinition& definition)
 {
     definition.width = attribute.Width;
     definition.height = attribute.Height;
-    definition.slot = attribute.m_byItemSlot;
+    definition.slot = static_cast<ItemSlot>(attribute.m_byItemSlot);
     definition.twoHanded = attribute.TwoHand;
     definition.skill = attribute.m_wSkillIndex;
     definition.level = attribute.Level;
@@ -48,7 +49,7 @@ void CopyStats(const ItemDefinition& definition, ITEM_ATTRIBUTE& attribute)
 {
     attribute.Width = definition.width;
     attribute.Height = definition.height;
-    attribute.m_byItemSlot = definition.slot;
+    attribute.m_byItemSlot = static_cast<BYTE>(definition.slot);
     attribute.TwoHand = definition.twoHanded;
     attribute.m_wSkillIndex = definition.skill;
     attribute.Level = definition.level;
@@ -79,28 +80,54 @@ void CopyRequirements(const ItemDefinition& definition, ITEM_ATTRIBUTE& attribut
     std::copy(definition.resistances.begin(), definition.resistances.end(), std::begin(attribute.Resistance));
 }
 
-std::wstring ReadName(const ITEM_ATTRIBUTE& attribute)
+void CopyName(const std::wstring& name, ITEM_ATTRIBUTE& attribute)
+{
+    const std::wstring cutName = CutToItemAttributeName(name);
+    std::fill(std::begin(attribute.Name), std::end(attribute.Name), L'\0');
+    cutName.copy(attribute.Name, cutName.size());
+}
+} // namespace
+
+std::wstring CutToItemAttributeName(const std::wstring& name)
+{
+    return name.substr(0, static_cast<size_t>(MAX_ITEM_NAME - 1));
+}
+
+std::wstring ReadItemAttributeName(const ITEM_ATTRIBUTE& attribute)
 {
     const wchar_t* nameEnd = std::find(std::begin(attribute.Name), std::end(attribute.Name), L'\0');
     return std::wstring(std::begin(attribute.Name), nameEnd);
 }
 
-void CopyName(const std::wstring& name, ITEM_ATTRIBUTE& attribute)
+void CopyItemAttributeStats(const ITEM_ATTRIBUTE& attribute, ItemDefinition& definition)
 {
-    const size_t length = std::min(name.size(), static_cast<size_t>(MAX_ITEM_NAME - 1));
-    std::fill(std::begin(attribute.Name), std::end(attribute.Name), L'\0');
-    name.copy(attribute.Name, length);
+    CopyStats(attribute, definition);
+    CopyRequirements(attribute, definition);
 }
-} // namespace
+
+void CopyFieldsNotInItemAttribute(const ItemDefinition& source, ItemDefinition& target)
+{
+    target.tags = source.tags;
+    target.wingTier = source.wingTier;
+    target.tradable = source.tradable;
+    target.droppable = source.droppable;
+    target.storable = source.storable;
+    target.sellable = source.sellable;
+    target.personalShopSellable = source.personalShopSellable;
+    target.repairable = source.repairable;
+    target.droppableWhileRented = source.droppableWhileRented;
+    target.personalShopSellableWhileRented = source.personalShopSellableWhileRented;
+    target.sellableWhenRentalExpired = source.sellableWhenRentalExpired;
+}
 
 ItemDefinition ToItemDefinition(const ITEM_ATTRIBUTE& attribute, int itemType)
 {
     ItemDefinition definition;
     definition.group = GetItemGroup(itemType);
     definition.number = GetItemNumber(itemType);
-    definition.name = ReadName(attribute);
-    CopyStats(attribute, definition);
-    CopyRequirements(attribute, definition);
+    definition.name = ReadItemAttributeName(attribute);
+    definition.names.Set(LocalizedString::NeutralLocale, Core::Text::ToUtf8(definition.name.c_str()));
+    CopyItemAttributeStats(attribute, definition);
     return definition;
 }
 
