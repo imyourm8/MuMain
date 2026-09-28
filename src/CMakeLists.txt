@@ -19,6 +19,26 @@ set(SDL_STATIC ON CACHE BOOL "" FORCE)
 set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
 set(SDL_TESTS OFF CACHE BOOL "" FORCE)
 set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
+option(MU_LINK_SDL_PLATFORM_BACKENDS
+  "Linux: make SDL link its video backend libraries and the Vulkan loader at build time instead of loading them at run time" OFF)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  # By default SDL dlopen()s libX11, libwayland-client, libdecor and libdrm/libgbm at run time,
+  # which needs them on a global library path. A packaged runtime may not have one; with the
+  # option ON they become DT_NEEDED entries with a recorded RUNPATH instead. Both branches FORCE
+  # the cache so toggling the option in an existing build directory is symmetric.
+  if(MU_LINK_SDL_PLATFORM_BACKENDS)
+    set(SDL_X11_SHARED OFF CACHE BOOL "" FORCE)
+    set(SDL_WAYLAND_SHARED OFF CACHE BOOL "" FORCE)
+    set(SDL_WAYLAND_LIBDECOR_SHARED OFF CACHE BOOL "" FORCE)
+    set(SDL_KMSDRM_SHARED OFF CACHE BOOL "" FORCE)
+  else()
+    set(SDL_X11_SHARED ON CACHE BOOL "" FORCE)
+    set(SDL_WAYLAND_SHARED ON CACHE BOOL "" FORCE)
+    set(SDL_WAYLAND_LIBDECOR_SHARED ON CACHE BOOL "" FORCE)
+    set(SDL_KMSDRM_SHARED ON CACHE BOOL "" FORCE)
+  endif()
+endif()
+
 add_subdirectory(ThirdParty/SDL EXCLUDE_FROM_ALL)
 set(_saved_BUILD_SHARED_LIBS "${BUILD_SHARED_LIBS}")
 set(BUILD_SHARED_LIBS OFF)
@@ -57,6 +77,20 @@ endif()
 
 # Editor mode option (for admin builds)
 option(ENABLE_EDITOR "Enable editor features for admin builds" OFF)
+
+# Developer control socket: a local socket through which test scripts drive
+# the client (login, move, attack, state, events). Never for player builds:
+# when OFF, none of its sources are compiled and the activation variable does
+# not exist in the binary (enforced by the control_socket_leak test).
+option(ENABLE_CONTROL_SOCKET "Developer control socket for scripted clients (never for player builds)" OFF)
+
+# In-game tests (docs/in-game-tests.md): publishes the tester, which plays test
+# scenarios with the client through the control socket, next to Main, and adds
+# the InGameTests / InGameTestsGui targets. Developers only, like the socket.
+option(ENABLE_IN_GAME_TESTS "Publish the in-game tester next to Main (developer builds with the control socket)" OFF)
+if(ENABLE_IN_GAME_TESTS AND NOT ENABLE_CONTROL_SOCKET)
+  message(FATAL_ERROR "ENABLE_IN_GAME_TESTS needs ENABLE_CONTROL_SOCKET: the tester drives the client through it")
+endif()
 
 # ---------------------------------------------------------------------------
 # Engine/game code -> static library (libMuClient); MuMain -> thin executable.
@@ -105,6 +139,18 @@ list(FILTER MU_CLIENT_SOURCES EXCLUDE REGEX "[/\\]Render[/\\]Renderer[/\\]MuRend
 # compiled as a second backend.
 list(FILTER MU_CLIENT_SOURCES EXCLUDE REGEX "[/\\]Render[/\\](Core|RHI|Shaders)[/\\]")
 
+# The control socket and its local-socket transport exist only in developer
+# builds. The two headers that the rest of the client includes
+# (App/Control/ControlTaps.h, ControlServer.h) compile to no-ops without
+# MU_ENABLE_CONTROL_SOCKET, so the call sites need no conditionals.
+if(NOT ENABLE_CONTROL_SOCKET)
+  list(FILTER MU_CLIENT_SOURCES EXCLUDE REGEX "[/\\]App[/\\]Control[/\\]")
+  list(FILTER MU_CLIENT_SOURCES EXCLUDE REGEX "[/\\]Core[/\\]Platform[/\\]LocalSocket\\.cpp$")
+  # The injector is the control socket's hands; its header compiles the two
+  # calls the rest of the client makes to nothing.
+  list(FILTER MU_CLIENT_SOURCES EXCLUDE REGEX "[/\\]Core[/\\]Input[/\\]SyntheticInput\\.cpp$")
+endif()
+
 # Add MuEditor sources when editor is enabled
 if(ENABLE_EDITOR)
   file(GLOB_RECURSE MU_EDITOR_SOURCES
@@ -147,13 +193,38 @@ endif()
 # attached PUBLIC below so both the Main executable and any test binary that
 # links MuClient inherit them automatically.
 add_library(MuClient STATIC ${MU_CLIENT_SOURCES})
+
+# The control socket's `ping` names the git commit the client was built from,
+# so a test report says which client it tested (cmake/WriteGitCommit.cmake).
+# Checked on every build; the header only changes with the commit.
+if(ENABLE_CONTROL_SOCKET)
+  set(MU_GIT_COMMIT_HEADER "${CMAKE_BINARY_DIR}/Generated/MuGitCommit.h")
+  add_custom_target(GitCommitHeader
+    COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}" "-DOUTPUT=${MU_GIT_COMMIT_HEADER}"
+            -P "${CMAKE_SOURCE_DIR}/cmake/WriteGitCommit.cmake"
+    BYPRODUCTS "${MU_GIT_COMMIT_HEADER}"
+    COMMENT "Recording the git commit for the control socket"
+    VERBATIM)
+  add_dependencies(MuClient GitCommitHeader)
+  target_include_directories(MuClient PRIVATE "${CMAKE_BINARY_DIR}/Generated")
+endif()
 target_compile_features(MuClient PUBLIC cxx_std_20)
 if(MSVC)
   target_compile_options(MuClient PRIVATE /utf-8 /we4828)
+  # Release normally ships with no debug info at all, so a WER/minidump crash
+  # from a Release build can't be symbolized. /Z7 embeds debug info directly
+  # in each .obj (unlike /Zi, it needs no shared .pdb write-lock, so it's safe
+  # under Ninja's parallel compilation) without touching optimization.
+  target_compile_options(MuClient PRIVATE $<$<CONFIG:Release>:/Z7>)
 endif()
 target_compile_definitions(MuClient PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
 target_link_libraries(MuClient PUBLIC SDL3::SDL3 glm::glm spdlog::spdlog)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND MU_LINK_SDL_PLATFORM_BACKENDS)
+  # SDL also dlopen()s libvulkan.so.1; the same option makes it a DT_NEEDED entry of Main
+  # (linked below) so the loader resolves through the RUNPATH.
+  find_package(Vulkan REQUIRED)
+endif()
 target_link_libraries(MuClient PUBLIC OpenSSL::Crypto)
 if(TARGET SDL3_ttf::SDL3_ttf)
   target_link_libraries(MuClient PUBLIC SDL3_ttf::SDL3_ttf)
@@ -237,6 +308,20 @@ else()
 endif()
 target_compile_features(Main PUBLIC cxx_std_20)
 target_link_libraries(Main PRIVATE MuClient::MuClient)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND MU_LINK_SDL_PLATFORM_BACKENDS)
+  target_link_libraries(Main PRIVATE Vulkan::Vulkan)
+endif()
+
+if (MSVC)
+  # Pairs with MuClient's /Z7 above: link the embedded debug info into
+  # Main.pdb so a Release crash dump can be symbolized (see there for why).
+  # /MAP also emits a plain-text RVA-to-function listing, much faster to grep
+  # for a WER crash offset than pulling symbols out of the PDB.
+  target_link_options(Main PRIVATE
+    $<$<CONFIG:Release>:/DEBUG>
+    $<$<CONFIG:Release>:/MAP:$<TARGET_FILE_DIR:Main>/Main.map>
+  )
+endif()
 
 if (NOT MSVC)
   set(MU_MAIN_MAP_FILE "${CMAKE_CURRENT_BINARY_DIR}/Main.map")
@@ -469,6 +554,9 @@ target_include_directories(MuClient PUBLIC
   "${CMAKE_BINARY_DIR}/generated"
   # stb_truetype backs the portable GDI text rasterizer (issue #462).
   "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/stb"
+  # nlohmann/json (json.hpp) reads the item data files (Data/Items) in every
+  # build and backs the control socket's request/response encoding.
+  "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty"
   $<$<BOOL:${ENABLE_EDITOR}>:${CMAKE_CURRENT_SOURCE_DIR}/MuEditor>
 )
 
@@ -490,6 +578,7 @@ target_compile_definitions(MuClient PUBLIC
   $<$<CONFIG:Debug>:_DEBUG;_FOREIGN_DEBUG>
   $<$<CONFIG:Release>:NDEBUG;_FOREIGN_NDEBUG;LDS_PATCH_GLOBAL_100520>
   $<$<BOOL:${ENABLE_EDITOR}>:_EDITOR>  # Editor features for admin builds
+  $<$<BOOL:${ENABLE_CONTROL_SOCKET}>:MU_ENABLE_CONTROL_SOCKET>  # Developer control socket
 )
 
 if (MSVC)
@@ -773,6 +862,106 @@ if (DOTNET_EXECUTABLE)
     add_dependencies(MuClient ResxGen)
     target_sources(MuClient PRIVATE ${RESX_GEN_SOURCES})
     target_include_directories(MuClient PUBLIC "${CMAKE_BINARY_DIR}/Generated")
+  endif()
+
+  # The in-game tester (docs/in-game-tests.md): published as one file next to
+  # Main (next to Main.app on macOS), so it finds the client without being told.
+  # It needs the .NET runtime, which building the client needs anyway. The
+  # InGameTests target plays the scenarios, InGameTestsGui opens its window:
+  #   cmake --build <build dir> --config Release --target InGameTests
+  if (ENABLE_IN_GAME_TESTS)
+    set(MU_IN_GAME_TEST_SERVER "127.0.0.1:56901" CACHE STRING
+      "Game server the InGameTests target logs the clients in to, host:port; default the test server")
+    option(MU_IN_GAME_TEST_FRESH_SERVER
+      "Recreate the test server (tools/InGameTests/docker-compose.yml) before every InGameTests run, so it starts from fresh test data"
+      ON)
+    set(MU_IN_GAME_TEST_SCENARIOS "" CACHE STRING
+      "In-game test scenarios the InGameTests target runs, e.g. trade;icarus-flying-item-take-off; empty runs all")
+    set(MU_IN_GAME_TEST_STEP_DELAY "0" CACHE STRING
+      "Milliseconds the InGameTests target pauses after every client action, to watch a run; 0 runs at full speed")
+    set(MU_IN_GAME_TEST_JPEG_QUALITY "70" CACHE STRING
+      "JPEG quality (1 to 100) of the InGameTests target's step screenshots; lower makes the report smaller")
+
+    set(IN_GAME_TESTS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../tools/InGameTests")
+    # Next to Main, which lands in the default runtime folder (next to Main.app
+    # on macOS): known without the target, so the file itself is the output and
+    # a deleted tester is published again.
+    get_property(IN_GAME_TESTS_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    if (IN_GAME_TESTS_MULTI_CONFIG)
+      set(IN_GAME_TESTS_DIR "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>")
+    else()
+      set(IN_GAME_TESTS_DIR "${CMAKE_CURRENT_BINARY_DIR}")
+    endif()
+    # The tester runs on the machine that runs dotnet, on its runtime
+    # (--use-current-runtime): an x86 client needs no x86 .NET for it.
+    if (DOTNET_EXECUTABLE MATCHES "\\.exe$")
+      set(IN_GAME_TESTS_NAME "InGameTests.exe")
+    else()
+      set(IN_GAME_TESTS_NAME "InGameTests")
+    endif()
+    set(IN_GAME_TESTS_EXE "${IN_GAME_TESTS_DIR}/${IN_GAME_TESTS_NAME}")
+    set(IN_GAME_TESTS_PUBLISH "${CMAKE_BINARY_DIR}/in-game-tests-publish")
+    file(GLOB_RECURSE IN_GAME_TESTS_SOURCES CONFIGURE_DEPENDS
+      "${IN_GAME_TESTS_ROOT}/*.cs" "${IN_GAME_TESTS_ROOT}/*.axaml")
+    list(FILTER IN_GAME_TESTS_SOURCES EXCLUDE REGEX "[/\\](bin|obj)[/\\]")
+    mu_native_path("${IN_GAME_TESTS_ROOT}/InGameTests.csproj" IN_GAME_TESTS_PROJ_NATIVE)
+    mu_native_path("${IN_GAME_TESTS_PUBLISH}" IN_GAME_TESTS_PUBLISH_NATIVE)
+
+    # Only when the tester's sources change; a client build alone does not
+    # publish it again. Published into the build folder first, whose path
+    # dotnet.exe understands under WSL too, then copied next to Main.
+    add_custom_command(
+      OUTPUT "${IN_GAME_TESTS_EXE}"
+      COMMAND ${CMAKE_COMMAND} -E env
+              --unset=Platform
+              "NUGET_PACKAGES=${DOTNET_NUGET_DIR_NATIVE}"
+              "DOTNET_CLI_HOME=${DOTNET_TEMP_DIR_NATIVE}"
+              "${DOTNET_EXECUTABLE}" publish "${IN_GAME_TESTS_PROJ_NATIVE}" -c Release --use-current-runtime
+              -o "${IN_GAME_TESTS_PUBLISH_NATIVE}" --nologo
+      COMMAND ${CMAKE_COMMAND} -E copy "${IN_GAME_TESTS_PUBLISH}/${IN_GAME_TESTS_NAME}" "${IN_GAME_TESTS_EXE}"
+      DEPENDS ${IN_GAME_TESTS_SOURCES} "${IN_GAME_TESTS_ROOT}/InGameTests.csproj" "${IN_GAME_TESTS_ROOT}/docker-compose.yml"
+      COMMENT "Publishing the in-game tester next to Main"
+      VERBATIM
+    )
+    add_custom_target(InGameTestsTool ALL DEPENDS "${IN_GAME_TESTS_EXE}")
+    add_dependencies(InGameTestsTool Main)
+
+    # A framework-dependent tester looks for .NET in the usual places; one
+    # installed elsewhere (dotnet-install.sh) is where CMake found dotnet.
+    set(IN_GAME_TESTS_ENV "")
+    if (NOT DOTNET_EXECUTABLE MATCHES "\\.exe$")
+      get_filename_component(IN_GAME_TESTS_DOTNET "${DOTNET_EXECUTABLE}" REALPATH)
+      get_filename_component(IN_GAME_TESTS_DOTNET_ROOT "${IN_GAME_TESTS_DOTNET}" DIRECTORY)
+      # Only a folder that holds a .NET: a snap's dotnet resolves to /usr/bin/snap.
+      if (EXISTS "${IN_GAME_TESTS_DOTNET_ROOT}/host/fxr")
+        set(IN_GAME_TESTS_ENV ${CMAKE_COMMAND} -E env "DOTNET_ROOT=${IN_GAME_TESTS_DOTNET_ROOT}")
+      endif()
+    endif()
+
+    set(IN_GAME_TESTS_SERVER_ARGS --server "${MU_IN_GAME_TEST_SERVER}")
+    if (MU_IN_GAME_TEST_FRESH_SERVER)
+      list(APPEND IN_GAME_TESTS_SERVER_ARGS --fresh-server)
+    endif()
+    set(IN_GAME_TESTS_ARGS -t "${MU_IN_GAME_TEST_STEP_DELAY}" -q "${MU_IN_GAME_TEST_JPEG_QUALITY}" ${IN_GAME_TESTS_SERVER_ARGS})
+    foreach(scenario IN LISTS MU_IN_GAME_TEST_SCENARIOS)
+      list(APPEND IN_GAME_TESTS_ARGS --scenario "${scenario}")
+    endforeach()
+
+    add_custom_target(InGameTests
+      COMMAND ${IN_GAME_TESTS_ENV} "${IN_GAME_TESTS_EXE}" --client "$<TARGET_FILE:Main>" ${IN_GAME_TESTS_ARGS}
+      COMMENT "In-game tests against ${MU_IN_GAME_TEST_SERVER}"
+      USES_TERMINAL
+      VERBATIM
+    )
+    add_dependencies(InGameTests InGameTestsTool)
+
+    add_custom_target(InGameTestsGui
+      COMMAND ${IN_GAME_TESTS_ENV} "${IN_GAME_TESTS_EXE}" --gui --client "$<TARGET_FILE:Main>" ${IN_GAME_TESTS_SERVER_ARGS}
+      COMMENT "In-game test window"
+      USES_TERMINAL
+      VERBATIM
+    )
+    add_dependencies(InGameTestsGui InGameTestsTool)
   endif()
 else()
   message(WARNING ".NET SDK not found. MUnique.Client.Library.dll will NOT be built. "

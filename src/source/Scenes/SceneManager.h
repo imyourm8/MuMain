@@ -4,6 +4,9 @@
 
 #include "Core/Platform/WinCompat.h"
 
+#include <functional>
+#include <string>
+
 //=============================================================================
 // Frame Timing State
 //=============================================================================
@@ -113,6 +116,36 @@ extern FrameTimingState g_frameTiming;
 void UpdateSceneState();
 void RenderScene(HDC Hdc);
 void MainScene(HDC hDC);
+
+//=============================================================================
+// Screenshots
+//=============================================================================
+
+// Outcome of a capture, reported once the file has been written.
+struct ScreenshotOutcome
+{
+    bool saved = false;
+    std::wstring path;
+    int width = 0;
+    int height = 0;
+};
+
+using ScreenshotCompletion = std::function<void(const ScreenshotOutcome&)>;
+
+// JPEG quality of a capture: Print Screen always writes the best one.
+constexpr int BestScreenshotQuality = 100;
+
+// Captures the next rendered frame the same way Print Screen does, writing it
+// to `path` (empty: the usual `Screen(...).jpg` beside the executable) as a JPEG
+// of `quality` (1 to 100) and calling `onComplete` on the frame the file is
+// finished. Returns false when a capture is already pending or the renderer
+// refused the readback.
+bool RequestScriptedScreenshot(const std::wstring& path, int quality, ScreenshotCompletion onComplete);
+
+// Drops a scripted capture that nobody is waiting for any more: its caller
+// went away, its act was never registered, or it was interrupted. The
+// completion is forgotten without being called.
+void CancelScriptedScreenshot();
 
 // FPS management (legacy - use g_frameTiming instead)
 void SetTargetFps(double targetFps);

@@ -38,9 +38,9 @@
 #include "SdlGpuPixelFormat.h"
 #include "SdlGpuReplayState.h"
 #include "SdlGpuValidation.h"
-#include "Core/Platform/BundledFonts.h"
 #include "Core/Utilities/FrameProfiler.h"
 #include "Core/Utilities/Log/MuLogger.h"
+#include "Render/Text/SdlTtfFontSet.h"
 #ifdef _EDITOR
 #include "Core/MuEditorCore.h"
 #endif
@@ -567,6 +567,12 @@ struct RenderCmd
     bool depthTestEnabled{};
     bool depthMaskEnabled{};
     bool cullFaceEnabled{};
+#ifdef _EDITOR
+    // Set once this command has been replayed into an editor offscreen capture
+    // (see BeginOffscreenCapture/EndOffscreenCapture); the main frame's replay
+    // pass then skips it instead of drawing it a second time into the swapchain.
+    bool consumedByOffscreenCapture = false;
+#endif
 };
 
 static std::vector<RenderCmd> s_renderCmds;
@@ -849,6 +855,33 @@ static Uint32 s_depthW = 0u;
 static Uint32 s_depthH = 0u;
 static SDL_FColor s_clearColor{0.0f, 0.0f, 0.0f, 1.0f};
 
+#ifdef _EDITOR
+// Editor-only isolated offscreen render captures (e.g. the Map Editor's object
+// preview thumbnails). A capture batches a sub-range of s_renderCmds - recorded
+// between BeginOffscreenCapture()/EndOffscreenCapture() - to be replayed into a
+// dedicated texture instead of the main swapchain. Never used on the normal
+// gameplay rendering path.
+struct PendingOffscreenCapture
+{
+    std::size_t startCmd;
+    std::size_t endCmd;
+    std::uint32_t textureId;
+    Uint32 width;
+    Uint32 height;
+};
+static std::vector<PendingOffscreenCapture> s_pendingOffscreenCaptures;
+static std::size_t s_offscreenCaptureStart = 0u;
+static std::uint32_t s_offscreenCaptureTextureId = 0u;
+static Uint32 s_offscreenCaptureWidth = 0u;
+static Uint32 s_offscreenCaptureHeight = 0u;
+
+// Shared depth buffer for offscreen captures, resized on demand. Captures are
+// processed strictly one at a time (never concurrently), so one is enough.
+static SDL_GPUTexture* s_offscreenDepthTexture = nullptr;
+static Uint32 s_offscreenDepthW = 0u;
+static Uint32 s_offscreenDepthH = 0u;
+#endif
+
 // Story 4.3.2 (AC-10): Fog uniform buffer and transfer buffer.
 static SDL_GPUBuffer* s_fogUniformBuf = nullptr;
 static SDL_GPUTransferBuffer* s_fogTransferBuf = nullptr;
@@ -856,134 +889,24 @@ static bool s_fogDirty = true; // upload on first draw if SetFog not called
 
 // Story 7.9.8 (AC-2): SDL_ttf GPU text engine and font variants.
 // s_textEngine: atlas-based text engine created after SDL_GPUDevice.
-// s_ttfFont*: pre-loaded fonts for UI text rendering (normal, bold, big, fixed).
+// s_ttfFonts: pre-loaded fonts for UI text rendering (normal, bold, big, fixed).
 static TTF_TextEngine* s_textEngine = nullptr;
-static TTF_Font* s_ttfFont = nullptr;      // normal (default)
-static TTF_Font* s_ttfFontBold = nullptr;  // bold weight
-static TTF_Font* s_ttfFontBig = nullptr;   // larger size, bold
-static TTF_Font* s_ttfFontFixed = nullptr; // monospace
-static TTF_Font* s_ttfFallback = nullptr;
-static TTF_Font* s_ttfFallbackBold = nullptr;
-static TTF_Font* s_ttfFallbackBig = nullptr;
-static TTF_Font* s_ttfFallbackFixed = nullptr;
-
-#ifdef NDEBUG
-inline constexpr bool kAllowSystemFontFallback = false;
-#else
-inline constexpr bool kAllowSystemFontFallback = true;
-#endif
+static Render::Text::SdlTtfFontSet s_ttfFonts;
 
 // F-7 fix: Cached window dimensions, updated once per frame in BeginFrame().
 static int s_cachedWinW = 0;
 static int s_cachedWinH = 0;
 
 #if MU_HAS_SDL_TTF
-[[nodiscard]] static std::string BundledFontPath(const char* relativePath)
-{
-    return ResolveBundledFontPath(relativePath).string();
-}
-
-[[nodiscard]] static std::string FindDeveloperFontPath()
-{
-#ifndef NDEBUG
-    static const char* const k_SystemFontPaths[] = {
-#ifdef __APPLE__
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-        "/System/Library/Fonts/Helvetica.ttc",
-        "/Library/Fonts/Arial Unicode.ttf",
-#elif defined(__linux__)
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/TTF/DejaVuSans.ttf",
-#else // Windows
-        "C:\\Windows\\Fonts\\arial.ttf",
-        "C:\\Windows\\Fonts\\segoeui.ttf",
-#endif
-    };
-
-    for (const char* path : k_SystemFontPaths)
-    {
-        if (std::filesystem::exists(path))
-        {
-            return path;
-        }
-    }
-#endif
-
-    return {};
-}
-
-static void CloseTtfFont(TTF_Font*& font)
-{
-    if (!font)
-        return;
-    TTF_CloseFont(font);
-    font = nullptr;
-}
-
-[[nodiscard]] static TTF_Font* OpenTtfFontRole(std::string_view family, std::string_view role, const char* relativePath,
-                                               float pointSize)
-{
-    const std::string packagedPath = BundledFontPath(relativePath);
-    if (TTF_Font* font = TTF_OpenFont(packagedPath.c_str(), pointSize))
-    {
-        mu::log::Get("render")->info("SDL_ttf -- bundled family='{}' role='{}' path='{}'", family, role, packagedPath);
-        return font;
-    }
-
-    mu::log::Get("render")->error("SDL_ttf -- bundled family='{}' role='{}' path='{}' failed: {}", family, role,
-                                  packagedPath, SDL_GetError());
-    if (!kAllowSystemFontFallback)
-        return nullptr;
-
-    const std::string fallbackPath = FindDeveloperFontPath();
-    if (fallbackPath.empty())
-        return nullptr;
-
-    mu::log::Get("render")->warn("SDL_ttf -- NON-PARITY developer font fallback family='{}' role='{}' path='{}'",
-                                 family, role, fallbackPath);
-    TTF_Font* fallback = TTF_OpenFont(fallbackPath.c_str(), pointSize);
-    if (!fallback)
-    {
-        mu::log::Get("render")->error(
-            "SDL_ttf -- NON-PARITY developer font fallback family='{}' role='{}' path='{}' failed: {}", family, role,
-            fallbackPath, SDL_GetError());
-    }
-    return fallback;
-}
-
-[[nodiscard]] static TTF_Font* OpenTtfFallbackRole(std::string_view role, float pointSize)
-{
-    const std::string packagedPath = BundledFontPath(kBundledFallbackFont.regular);
-    TTF_Font* font = TTF_OpenFont(packagedPath.c_str(), pointSize);
-    if (font)
-    {
-        mu::log::Get("render")->info("SDL_ttf -- bundled fallback family='{}' role='{}' path='{}'",
-                                     kBundledFallbackFont.family, role, packagedPath);
-        return font;
-    }
-
-    mu::log::Get("render")->error("SDL_ttf -- bundled fallback family='{}' role='{}' path='{}' failed: {}",
-                                  kBundledFallbackFont.family, role, packagedPath, SDL_GetError());
-    return nullptr;
-}
-
-[[nodiscard]] static bool AttachTtfFallback(TTF_Font* font, TTF_Font* fallback, std::string_view role)
-{
-    if (TTF_AddFallbackFont(font, fallback))
-        return true;
-
-    mu::log::Get("render")->error("SDL_ttf -- fallback attach failed for role='{}': {}", role, SDL_GetError());
-    return false;
-}
-
 static void WarmTtfFonts()
 {
     static constexpr const char* k_WarmupGlyphs = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
                                                   "0123456789 !@#$%^&*()-_=+[]{}|;:',.<>?/~`\"\\한글";
-    TTF_Font* fonts[] = {s_ttfFont, s_ttfFontBold, s_ttfFontBig, s_ttfFontFixed};
-    for (TTF_Font* font : fonts)
+    using Render::Text::SdlTtfFontRole;
+    for (SdlTtfFontRole role :
+         {SdlTtfFontRole::Normal, SdlTtfFontRole::Bold, SdlTtfFontRole::Big, SdlTtfFontRole::Fixed})
     {
+        TTF_Font* font = s_ttfFonts.Get(role);
         TTF_Text* warmup = TTF_CreateText(s_textEngine, font, k_WarmupGlyphs, 0);
         if (!warmup)
             continue;
@@ -995,51 +918,9 @@ static void WarmTtfFonts()
 [[nodiscard]] static bool LoadTtfFonts(std::string_view configuredFamily, float normalPointSize, float bigPointSize,
                                        float fixedPointSize)
 {
-    const BundledFont& family = ResolveBundledFont(configuredFamily);
-    TTF_Font* normal = OpenTtfFontRole(family.family, "normal", family.regular, normalPointSize);
-    TTF_Font* bold = OpenTtfFontRole(family.family, "bold", family.bold, normalPointSize);
-    TTF_Font* big = OpenTtfFontRole(family.family, "big-bold", family.bold, bigPointSize);
-    TTF_Font* fixed =
-        OpenTtfFontRole(kBundledFixedFont.family, "fixed", kBundledFixedFont.regular, fixedPointSize);
-    TTF_Font* fallback = OpenTtfFallbackRole("normal", normalPointSize);
-    TTF_Font* fallbackBold = OpenTtfFallbackRole("bold", normalPointSize);
-    TTF_Font* fallbackBig = OpenTtfFallbackRole("big-bold", bigPointSize);
-    TTF_Font* fallbackFixed = OpenTtfFallbackRole("fixed", fixedPointSize);
-    if (fallbackBold)
-        TTF_SetFontStyle(fallbackBold, TTF_STYLE_BOLD);
-    if (fallbackBig)
-        TTF_SetFontStyle(fallbackBig, TTF_STYLE_BOLD);
-    if (!normal || !bold || !big || !fixed || !fallback || !fallbackBold || !fallbackBig || !fallbackFixed ||
-        !AttachTtfFallback(normal, fallback, "normal") || !AttachTtfFallback(bold, fallbackBold, "bold") ||
-        !AttachTtfFallback(big, fallbackBig, "big-bold") || !AttachTtfFallback(fixed, fallbackFixed, "fixed"))
-    {
-        CloseTtfFont(fixed);
-        CloseTtfFont(big);
-        CloseTtfFont(bold);
-        CloseTtfFont(normal);
-        CloseTtfFont(fallbackFixed);
-        CloseTtfFont(fallbackBig);
-        CloseTtfFont(fallbackBold);
-        CloseTtfFont(fallback);
+    if (!s_ttfFonts.Load(configuredFamily, normalPointSize, bigPointSize, fixedPointSize))
         return false;
-    }
 
-    CloseTtfFont(s_ttfFontFixed);
-    CloseTtfFont(s_ttfFontBig);
-    CloseTtfFont(s_ttfFontBold);
-    CloseTtfFont(s_ttfFont);
-    CloseTtfFont(s_ttfFallbackFixed);
-    CloseTtfFont(s_ttfFallbackBig);
-    CloseTtfFont(s_ttfFallbackBold);
-    CloseTtfFont(s_ttfFallback);
-    s_ttfFont = normal;
-    s_ttfFontBold = bold;
-    s_ttfFontBig = big;
-    s_ttfFontFixed = fixed;
-    s_ttfFallback = fallback;
-    s_ttfFallbackBold = fallbackBold;
-    s_ttfFallbackBig = fallbackBig;
-    s_ttfFallbackFixed = fallbackFixed;
     WarmTtfFonts();
     return true;
 }
@@ -1530,15 +1411,8 @@ public:
 
 #if MU_HAS_SDL_TTF
         // Story 7.9.8 (AC-2): Destroy SDL_ttf resources before the GPU device.
-        // Close font variants first, then default font, then engine.
-        CloseTtfFont(s_ttfFontFixed);
-        CloseTtfFont(s_ttfFontBig);
-        CloseTtfFont(s_ttfFontBold);
-        CloseTtfFont(s_ttfFont);
-        CloseTtfFont(s_ttfFallbackFixed);
-        CloseTtfFont(s_ttfFallbackBig);
-        CloseTtfFont(s_ttfFallbackBold);
-        CloseTtfFont(s_ttfFallback);
+        // Close the fonts first, then the engine.
+        s_ttfFonts.Close();
         if (s_textEngine)
         {
             TTF_DestroyGPUTextEngine(s_textEngine);
@@ -1682,10 +1556,12 @@ public:
         // If swapchain texture is null, window is minimized/occluded — skip frame.
         if (!s_swapchainTexture)
         {
-            // Debug-level only — this happens normally when window is minimized.
+            // Debug-level only — this happens normally when window is minimized,
+            // and now and then for a visible window while too many frames are in
+            // flight. A requested readback stays pending for the next frame that
+            // renders; its consumer decides how long to wait.
             SDL_CancelGPUCommandBuffer(s_cmdBuf);
             s_cmdBuf = nullptr;
-            FailPendingFrameReadback();
             return;
         }
 
@@ -1716,13 +1592,14 @@ public:
     {
         if (!s_frameActive)
         {
-            // Frame was not started (minimized window or error).
+            // Frame was not started (minimized window or error). BeginFrame
+            // already failed a pending readback on an error; a skipped frame
+            // keeps it for the next one.
             if (s_cmdBuf)
             {
                 SDL_CancelGPUCommandBuffer(s_cmdBuf);
                 s_cmdBuf = nullptr;
             }
-            FailPendingFrameReadback();
             return;
         }
         s_frameActive = false;
@@ -1906,6 +1783,13 @@ public:
         }
         s_textureUpdates.clear();
 
+#ifdef _EDITOR
+        // Phase 2b (editor-only): replay any pending offscreen captures (e.g. Map
+        // Editor object thumbnails) into their own dedicated textures now that the
+        // GPU vertex buffer holds their data, before the main pass below runs.
+        ProcessPendingOffscreenCaptures(boneDataReady);
+#endif
+
         // ---------------------------------------------------------------
         // Phase 3: Render pass — replay all recorded draw commands.
         // The GPU vertex/index buffers now contain current-frame data.
@@ -1980,6 +1864,12 @@ public:
                 {
                     continue;
                 }
+#ifdef _EDITOR
+                if (cmd.consumedByOffscreenCapture)
+                {
+                    continue; // already drawn into its own offscreen texture above
+                }
+#endif
                 ++s_dbgRenderCmdsReplayedThisFrame;
 
                 switch (cmd.type)
@@ -2145,6 +2035,12 @@ public:
 
         pixels = std::move(completed);
         return true;
+    }
+
+    void CancelFramePixels() override
+    {
+        s_frameReadbackState.Reset();
+        ReleaseFrameReadbackTexture();
     }
 
     // -----------------------------------------------------------------------
@@ -2460,21 +2356,21 @@ public:
     // Story 7.9.8 (AC-2): Default TTF font accessor.
     [[nodiscard]] TTF_Font* GetTtfFont() override
     {
-        return s_ttfFont;
+        return s_ttfFonts.Get(Render::Text::SdlTtfFontRole::Normal);
     }
 
     // F-1 fix: Font variant accessors for bold, big, and fixed-width text.
     [[nodiscard]] TTF_Font* GetTtfFontBold() override
     {
-        return s_ttfFontBold ? s_ttfFontBold : s_ttfFont;
+        return s_ttfFonts.Get(Render::Text::SdlTtfFontRole::Bold);
     }
     [[nodiscard]] TTF_Font* GetTtfFontBig() override
     {
-        return s_ttfFontBig ? s_ttfFontBig : s_ttfFont;
+        return s_ttfFonts.Get(Render::Text::SdlTtfFontRole::Big);
     }
     [[nodiscard]] TTF_Font* GetTtfFontFixed() override
     {
-        return s_ttfFontFixed ? s_ttfFontFixed : s_ttfFont;
+        return s_ttfFonts.Get(Render::Text::SdlTtfFontRole::Fixed);
     }
 
     [[nodiscard]] bool ReloadTtfFonts(std::string_view fontFamily, float normalPointSize, float bigPointSize,
@@ -2649,6 +2545,127 @@ public:
 
         ReleaseOwnedTextureById(textureId);
     }
+
+#ifdef _EDITOR
+    // Same shape as EnsureTexture, but with COLOR_TARGET usage added so the result
+    // can be rendered into (not just sampled) - needed for offscreen captures.
+    void EnsureOffscreenColorTexture(std::uint32_t textureId, std::uint32_t width, std::uint32_t height)
+    {
+        if (!s_device || textureId == 0 || width == 0 || height == 0)
+        {
+            return;
+        }
+
+        auto existing = s_textureMap.find(textureId);
+        if (existing != s_textureMap.end())
+        {
+            if (!s_ownedTextureIds.contains(textureId))
+            {
+                return;
+            }
+
+            auto sizeIt = s_textureSizes.find(textureId);
+            if (sizeIt != s_textureSizes.end() && sizeIt->second.first == width && sizeIt->second.second == height)
+            {
+                return;
+            }
+
+            ReleaseOwnedTextureById(textureId);
+        }
+
+        SDL_GPUTextureCreateInfo texInfo{};
+        texInfo.type = SDL_GPU_TEXTURETYPE_2D;
+        texInfo.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+        texInfo.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+        texInfo.width = width;
+        texInfo.height = height;
+        texInfo.layer_count_or_depth = 1;
+        texInfo.num_levels = 1;
+        texInfo.sample_count = SDL_GPU_SAMPLECOUNT_1;
+
+        SDL_GPUTexture* texture = SDL_CreateGPUTexture(s_device, &texInfo);
+        if (!texture)
+        {
+            mu::log::Get("render")->warn("SDL_gpu -- offscreen capture texture {} creation failed ({}x{}): {}",
+                                         textureId, width, height, SDL_GetError());
+            return;
+        }
+
+        s_textureMap[textureId] = texture;
+        InvalidateTextureLookupCache();
+        s_textureSizes[textureId] = {width, height};
+        s_ownedTextureIds.insert(textureId);
+        ++s_dbgTextureCreatesThisFrame;
+    }
+
+    [[nodiscard]] std::uint32_t BeginOffscreenCapture(std::uint32_t textureId, std::uint32_t width,
+                                                       std::uint32_t height) override
+    {
+        if (!s_device || !s_frameActive || width == 0u || height == 0u)
+        {
+            mu::log::Get("render")->warn(
+                "SDL_gpu -- BeginOffscreenCapture precondition failed: device={} frameActive={} w={} h={}",
+                s_device != nullptr, s_frameActive, width, height);
+            return 0u;
+        }
+        if (s_offscreenCaptureTextureId != 0u)
+        {
+            // A capture is already open - BeginOffscreenCapture/EndOffscreenCapture
+            // pairs don't nest. Refuse rather than silently corrupting the other one.
+            mu::log::Get("render")->warn("SDL_gpu -- BeginOffscreenCapture called while another is still open");
+            return 0u;
+        }
+
+        if (textureId == 0u)
+        {
+            textureId = AllocateOwnedDynamicTextureId();
+            if (textureId == 0u)
+            {
+                mu::log::Get("render")->warn("SDL_gpu -- BeginOffscreenCapture: AllocateOwnedDynamicTextureId failed");
+                return 0u;
+            }
+        }
+
+        EnsureOffscreenColorTexture(textureId, width, height);
+        if (!IsTextureRegistered(textureId))
+        {
+            mu::log::Get("render")->warn("SDL_gpu -- BeginOffscreenCapture: texture {} not registered after "
+                                         "EnsureOffscreenColorTexture ({}x{})",
+                                         textureId, width, height);
+            return 0u;
+        }
+
+        s_offscreenCaptureStart = s_renderCmds.size();
+        s_offscreenCaptureTextureId = textureId;
+        s_offscreenCaptureWidth = width;
+        s_offscreenCaptureHeight = height;
+        return textureId;
+    }
+
+    void EndOffscreenCapture() override
+    {
+        if (s_offscreenCaptureTextureId == 0u)
+        {
+            return;
+        }
+
+        s_pendingOffscreenCaptures.push_back({s_offscreenCaptureStart, s_renderCmds.size(),
+                                              s_offscreenCaptureTextureId, s_offscreenCaptureWidth,
+                                              s_offscreenCaptureHeight});
+        s_offscreenCaptureTextureId = 0u;
+    }
+
+    [[nodiscard]] void* GetTexturePointer(std::uint32_t textureId) const override
+    {
+        const auto it = s_textureMap.find(textureId);
+        return it != s_textureMap.end() ? it->second : nullptr;
+    }
+
+    [[nodiscard]] bool HasPendingOffscreenCaptures() const override
+    {
+        return !s_pendingOffscreenCaptures.empty();
+    }
+#endif // _EDITOR
 
     [[nodiscard]] std::uint32_t CreateTexture(std::uint32_t width, std::uint32_t height, const void* pixels) override
     {
@@ -4182,6 +4199,123 @@ private:
         s_depthH = height;
         return true;
     }
+
+#ifdef _EDITOR
+    // Depth buffer for editor offscreen captures (see BeginOffscreenCapture). Same
+    // shape as CreateOrResizeDepthTexture but keeps its own texture, since it's
+    // sized for a small thumbnail, not the swapchain.
+    static bool EnsureOffscreenDepthTexture(Uint32 width, Uint32 height)
+    {
+        if (width == 0 || height == 0)
+        {
+            return false;
+        }
+        if (s_offscreenDepthTexture && s_offscreenDepthW == width && s_offscreenDepthH == height)
+        {
+            return true;
+        }
+        if (s_offscreenDepthTexture)
+        {
+            SDL_ReleaseGPUTexture(s_device, s_offscreenDepthTexture);
+            s_offscreenDepthTexture = nullptr;
+        }
+
+        SDL_GPUTextureCreateInfo depthInfo{};
+        depthInfo.type = SDL_GPU_TEXTURETYPE_2D;
+        depthInfo.format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+        depthInfo.width = width;
+        depthInfo.height = height;
+        depthInfo.layer_count_or_depth = 1;
+        depthInfo.num_levels = 1;
+        depthInfo.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
+
+        s_offscreenDepthTexture = SDL_CreateGPUTexture(s_device, &depthInfo);
+        if (!s_offscreenDepthTexture)
+        {
+            mu::log::Get("render")->error("SDL_gpu -- offscreen capture depth texture creation failed ({}x{}): {}",
+                                          width, height, SDL_GetError());
+            s_offscreenDepthW = 0u;
+            s_offscreenDepthH = 0u;
+            return false;
+        }
+
+        s_offscreenDepthW = width;
+        s_offscreenDepthH = height;
+        return true;
+    }
+
+    // Replays each pending offscreen capture's recorded command range (see
+    // BeginOffscreenCapture) into its own dedicated render pass, then marks those
+    // commands consumed so the main pass later skips them instead of drawing them
+    // a second time into the swapchain. Called from EndFrame() after the vertex
+    // buffer upload, before the main render pass begins.
+    void ProcessPendingOffscreenCaptures(bool boneDataReady)
+    {
+        if (s_pendingOffscreenCaptures.empty())
+        {
+            return;
+        }
+
+        for (const auto& capture : s_pendingOffscreenCaptures)
+        {
+            const auto textureIt = s_textureMap.find(capture.textureId);
+            if (textureIt == s_textureMap.end() || !EnsureOffscreenDepthTexture(capture.width, capture.height))
+            {
+                continue;
+            }
+
+            SDL_GPUColorTargetInfo colorTarget{};
+            colorTarget.texture = static_cast<SDL_GPUTexture*>(textureIt->second);
+            colorTarget.clear_color = SDL_FColor{0.10f, 0.10f, 0.12f, 1.0f};
+            colorTarget.load_op = SDL_GPU_LOADOP_CLEAR;
+            colorTarget.store_op = SDL_GPU_STOREOP_STORE;
+
+            SDL_GPUDepthStencilTargetInfo depthTarget{};
+            depthTarget.texture = s_offscreenDepthTexture;
+            depthTarget.clear_depth = 1.0f;
+            depthTarget.load_op = SDL_GPU_LOADOP_CLEAR;
+            depthTarget.store_op = SDL_GPU_STOREOP_DONT_CARE;
+            depthTarget.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+            depthTarget.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+            depthTarget.cycle = true;
+
+            s_renderPass = SDL_BeginGPURenderPass(s_cmdBuf, &colorTarget, 1, &depthTarget);
+            if (!s_renderPass)
+            {
+                mu::log::Get("render")->warn("SDL_gpu -- offscreen capture render pass failed: {}", SDL_GetError());
+                continue;
+            }
+
+            const SDL_GPUViewport viewport{0.0f, 0.0f, static_cast<float>(capture.width),
+                                           static_cast<float>(capture.height), 0.0f, 1.0f};
+            SDL_SetGPUViewport(s_renderPass, &viewport);
+            const SDL_Rect scissor{0, 0, static_cast<int>(capture.width), static_cast<int>(capture.height)};
+            SDL_SetGPUScissor(s_renderPass, &scissor);
+
+            Render::SdlGpuReplayState replayState;
+            for (std::size_t i = capture.startCmd; i < capture.endCmd && i < s_renderCmds.size(); ++i)
+            {
+                RenderCmd& cmd = s_renderCmds[i];
+                const bool isGeometryDraw = cmd.type == RenderCmdType::DrawTriangles ||
+                                           cmd.type == RenderCmdType::DrawSkinnedTriangles ||
+                                           cmd.type == RenderCmdType::DrawIndexedQuads ||
+                                           cmd.type == RenderCmdType::DrawIndexedStrip ||
+                                           cmd.type == RenderCmdType::DrawTriangles2D;
+                if (!isGeometryDraw)
+                {
+                    continue; // skip SetViewport/SetScissor/EditorOverlay - not relevant to a model capture
+                }
+                ReplayDrawCommand(cmd, boneDataReady, scissor, replayState);
+                cmd.consumedByOffscreenCapture = true;
+            }
+
+            SDL_EndGPURenderPass(s_renderPass);
+            s_renderPass = nullptr;
+        }
+
+        s_pendingOffscreenCaptures.clear();
+    }
+#endif // _EDITOR
 
     // -----------------------------------------------------------------------
     // Story 4.3.2 (AC-10): CreateFogUniformBuffers
