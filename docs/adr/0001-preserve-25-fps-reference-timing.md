@@ -37,6 +37,20 @@ Below 25 FPS the factor remains capped at `1`. The simulation slows instead
 of taking oversized steps that can skip animation keys or destabilize legacy
 logic.
 
+### Fire trails and flock steering
+
+Fire Burst emits flame particles whose speed grows by 5% per reference frame.
+Their acceleration is `1.05 ^ FPS_ANIMATION_FACTOR`: over their 12-reference-frame
+lifetime, speed grows by about 1.8 times at every supported frame rate. Applying
+5% on every rendered frame instead makes the same particles reach about 4.1 times
+their initial speed at 60 FPS, stretching the trail away from its emitter.
+
+Ambient flocks move along local +X, so their heading uses `atan2(dy, dx)`.
+Character and projectile headings use local -Y and must retain their different
+angle convention. Flock turn limits are degrees per reference frame, scaled by
+the animation factor with fractional angles retained. Coincident neighbors do
+not contribute a heading, avoiding division by zero in the flock average.
+
 ## Consequences
 
 - Raw per-frame increments are defects unless the value is intentionally

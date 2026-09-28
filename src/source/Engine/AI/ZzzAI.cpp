@@ -128,7 +128,8 @@ float FarAngle(float angle1, float angle2, bool absolute)
 
 int CalcAngle(float PositionX, float PositionY, float TargetX, float TargetY)
 {
-    const float targetAngle = CreateAngle(PositionX, PositionY, TargetX, TargetY);
+    // Flocks move along local +X; CreateAngle uses the character's local -Y.
+    const float targetAngle = std::atan2(TargetY - PositionY, TargetX - PositionX) * RAD_TO_DEG;
     return NormalizeAngleInt(static_cast<int>(std::lround(targetAngle)));
 }
 
@@ -192,6 +193,41 @@ void Alpha(OBJECT* o)
         o->BlendMeshLight = o->Alpha;
 }
 
+namespace
+{
+bool AccumulateBoidHeading(const OBJECT& bird, const OBJECT& neighbor, float& targetX, float& targetY)
+{
+    constexpr float flockRadius = 400.f;
+    constexpr float separationRadius = 80.f;
+    vec3_t range;
+    VectorSubtract(bird.Position, neighbor.Position, range);
+    const float distance = VectorLength(range);
+    if (distance >= flockRadius)
+        return false;
+
+    float x = neighbor.Direction[0] - neighbor.Position[0];
+    float y = neighbor.Direction[1] - neighbor.Position[1];
+    if (distance < separationRadius)
+    {
+        x -= neighbor.Direction[0] - bird.Position[0];
+        y -= neighbor.Direction[1] - bird.Position[1];
+    }
+    else
+    {
+        x += neighbor.Direction[0] - bird.Position[0];
+        y += neighbor.Direction[1] - bird.Position[1];
+    }
+
+    const float length = std::sqrt(x * x + y * y);
+    if (length <= std::numeric_limits<float>::epsilon())
+        return false;
+
+    targetX += x / length;
+    targetY += y / length;
+    return true;
+}
+}
+
 void MoveBoid(OBJECT* o, int i, OBJECT* Boids, int MAX)
 {
     int NumBirds = 0;
@@ -200,42 +236,18 @@ void MoveBoid(OBJECT* o, int i, OBJECT* Boids, int MAX)
     for (int j = 0; j < MAX; j++)
     {
         OBJECT* t = &Boids[j];
-        if (t->Live && j != i)
+        if (t->Live && j != i && AccumulateBoidHeading(*o, *t, TargetX, TargetY))
         {
-            vec3_t Range;
-            VectorSubtract(o->Position, t->Position, Range);
-            const auto distance = VectorLength(Range);
-            if (distance < 400.f)
-            {
-                float xdist = t->Direction[0] - t->Position[0];
-                float ydist = t->Direction[1] - t->Position[1];
-                if (distance < 80.f)
-                {
-                    xdist -= t->Direction[0] - o->Position[0];
-                    ydist -= t->Direction[1] - o->Position[1];
-                }
-                else
-                {
-                    xdist += t->Direction[0] - o->Position[0];
-                    ydist += t->Direction[1] - o->Position[1];
-                }
-
-                xdist *= FPS_ANIMATION_FACTOR;
-                ydist *= FPS_ANIMATION_FACTOR;
-                float pdist = std::sqrt(xdist * xdist + ydist * ydist);
-                TargetX += xdist / pdist;
-                TargetY += ydist / pdist;
-                NumBirds++;
-            }
+            NumBirds++;
         }
     }
-    if (NumBirds > 0)
+    if (NumBirds > 0 && (TargetX != 0.f || TargetY != 0.f))
     {
         TargetX = o->Position[0] + TargetX / NumBirds;
         TargetY = o->Position[1] + TargetY / NumBirds;
 
-        o->Angle[2] = (float)TurnAngle((int)o->Angle[2], CalcAngle(o->Position[0], o->Position[1], TargetX, TargetY),
-                                       (int)o->Gravity);
+        o->Angle[2] = TurnAngle2(o->Angle[2], CalcAngle(o->Position[0], o->Position[1], TargetX, TargetY),
+                               o->Gravity * FPS_ANIMATION_FACTOR);
     }
 }
 
